@@ -14,38 +14,37 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class HealthRecommendationViewSet(viewsets.ReadOnlyModelViewSet):
-    serializer_class = HealthRecommendationSerializer
+from rest_framework.views import APIView
 
-    def get_queryset(self):
-        employee = getattr(self.request.user, "employee", None)
-        if not employee:
-            return HealthRecommendation.objects.none()
-        return HealthRecommendation.objects.filter(employee=employee).order_by('-created_at')
+class HealthRecommendationView(APIView):
+    """
+    Генерирует рекомендации на лету без сохранения
+    GET /api/users/recomended/
+    """
+    permission_classes = [permissions.IsAuthenticated]
 
-    @action(detail=False, methods=['get'], url_path='comprehensive-analysis')
-    def comprehensive_analysis(self, request):
+    def get(self, request):
         employee = getattr(request.user, "employee", None)
         if not employee:
-            return Response({"error": "Профиль сотрудника не найден"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Профиль сотрудника не найден"},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
         try:
-            # Генерация анализа
             result = get_comprehensive_analysis(employee)
 
-            # Сохраняем только для этого пользователя
-            HealthRecommendation.objects.create(employee=employee, text=result["analysis"])
-
-            logger.info(f"Comprehensive analysis generated for employee {employee.id}")
-            return Response(result, status=status.HTTP_200_OK)
+            return Response({
+                "analysis": result["analysis"],
+                "chart_data": result["chart_data"]
+            }, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Error in comprehensive_analysis endpoint: {e}")
+            logger.error(f"Error generating recommendations: {e}")
             return Response(
                 {"error": "Ошибка при генерации анализа", "details": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 class RegisterView(APIView):
     permission_classes = [permissions.AllowAny]

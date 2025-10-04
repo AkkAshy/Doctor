@@ -3,12 +3,11 @@ from django.urls import path
 from django.urls import path, include
 from .views import  RegisterView, ProfileUpdateView, GetProfileView, ConfirmTelegramCodeView
 from rest_framework_simplejwt.views import TokenRefreshView, TokenObtainPairView
-from .views import GenerateTelegramCodeView, TelegramProfileView, HealthRecommendationViewSet
+from .views import GenerateTelegramCodeView, TelegramProfileView, HealthRecommendationView
 from rest_framework.routers import DefaultRouter
 
 
-router = DefaultRouter()
-router.register(r'recomended', HealthRecommendationViewSet, basename='recomended')
+
 
 urlpatterns = [
     path('login/', TokenObtainPairView.as_view(), name='login'),
@@ -21,6 +20,6 @@ urlpatterns = [
     path('telegram/generate_code/', GenerateTelegramCodeView.as_view(), name='telegram_generate_code'),
     path('telegram/confirm_code/', ConfirmTelegramCodeView.as_view()),
     path("telegram/profile/<int:telegram_id>/", TelegramProfileView.as_view()),
-    path('', include(router.urls)),
+    path('recomended/', HealthRecommendationView.as_view(), name='recommendations'),
 
 ]
