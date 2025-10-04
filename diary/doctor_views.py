@@ -1,11 +1,12 @@
 # diary/doctor_views.py
-from rest_framework import viewsets, permissions, filters, status
+from rest_framework import viewsets, permissions, filters, status, serializers
 from rest_framework.decorators import action
-from rest_framework import serializers
 from rest_framework.response import Response
 from django.db.models import Q, Avg, Count, Max, Min
 from django_filters.rest_framework import DjangoFilterBackend
 from datetime import datetime, timedelta
+from drf_spectacular.utils import extend_schema, OpenApiParameter
+from drf_spectacular.types import OpenApiTypes
 
 from authapp.models import Employee
 from .models import GlucoseMeasurement, Event, Medication, StressNote, Reminder, MealPhoto
@@ -58,7 +59,6 @@ class DoctorPatientSerializer(serializers.ModelSerializer):
         return None
     
     def get_avg_glucose(self, obj):
-        # Средний уровень глюкозы за последние 7 дней
         week_ago = datetime.now() - timedelta(days=7)
         avg = obj.glucose_measurements.filter(
             measured_at__gte=week_ago
@@ -127,13 +127,10 @@ class DoctorStressNoteDetailSerializer(StressNoteSerializer):
 
 # ==================== ViewSets для врача ====================
 
+@extend_schema(tags=['Врач - Пациенты'])
 class DoctorPatientViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    ViewSet для просмотра списка пациентов врачом
-    
-    Фильтры:
-    - search: поиск по имени, фамилии, телефону
-    - ordering: сортировка по created_at, full_name
+    API для работы врача с пациентами
     """
     serializer_class = DoctorPatientSerializer
     permission_classes = [IsDoctorPermission]
@@ -143,23 +140,94 @@ class DoctorPatientViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-created_at']
     
     def get_queryset(self):
-        # Только пациенты (role='user')
         return Employee.objects.filter(role='user').select_related('user')
     
+    @extend_schema(
+        summary="Список пациентов",
+        description="""
+        Возвращает список всех пациентов врача.
+        
+        **Поддерживаемые фильтры:**
+        - search: поиск по имени, фамилии, телефону, username
+        - ordering: сортировка по created_at, user__first_name, user__last_name
+        """,
+        parameters=[
+            OpenApiParameter('search', OpenApiTypes.STR, description='Поиск по имени/телефону'),
+            OpenApiParameter('ordering', OpenApiTypes.STR, description='Сортировка')
+        ]
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+    
+    @extend_schema(
+        summary="Детали пациента",
+        description="Возвращает подробную информацию о конкретном пациенте"
+    )
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+    
+    @extend_schema(
+        summary="Статистика пациента",
+        description="""
+        Детальная статистика по пациенту за выбранный период:
+        
+        - Статистика по глюкозе (среднее, макс, мин)
+        - Количество событий по типам
+        - Статистика по лекарствам
+        - Количество стресс-заметок
+        """,
+        parameters=[
+            OpenApiParameter(
+                'days',
+                OpenApiTypes.INT,
+                description='Количество дней для анализа (по умолчанию 30)',
+                required=False
+            )
+        ],
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "patient": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "name": {"type": "string"},
+                            "phone": {"type": "string"}
+                        }
+                    },
+                    "period_days": {"type": "integer"},
+                    "glucose": {
+                        "type": "object",
+                        "properties": {
+                            "average": {"type": "number"},
+                            "max": {"type": "number"},
+                            "min": {"type": "number"},
+                            "measurements_count": {"type": "integer"}
+                        }
+                    },
+                    "events": {
+                        "type": "object",
+                        "properties": {
+                            "total": {"type": "integer"},
+                            "meals": {"type": "integer"},
+                            "walks": {"type": "integer"},
+                            "sports": {"type": "integer"}
+                        }
+                    },
+                    "medications": {"type": "array"},
+                    "stress_notes_count": {"type": "integer"}
+                }
+            }
+        }
+    )
     @action(detail=True, methods=['get'])
     def statistics(self, request, pk=None):
-        """
-        Статистика по конкретному пациенту
-        
-        GET /api/doctor/patients/{id}/statistics/
-        """
         patient = self.get_object()
         
-        # Параметры для фильтрации по датам
         days = int(request.query_params.get('days', 30))
         date_from = datetime.now() - timedelta(days=days)
         
-        # Статистика по глюкозе
         glucose_stats = patient.glucose_measurements.filter(
             measured_at__gte=date_from
         ).aggregate(
@@ -169,7 +237,6 @@ class DoctorPatientViewSet(viewsets.ReadOnlyModelViewSet):
             count=Count('id')
         )
         
-        # Статистика по событиям
         events_stats = {
             'total': patient.events.filter(start_time__gte=date_from).count(),
             'meals': patient.events.filter(type='meal', start_time__gte=date_from).count(),
@@ -177,12 +244,10 @@ class DoctorPatientViewSet(viewsets.ReadOnlyModelViewSet):
             'sports': patient.events.filter(type='sport', start_time__gte=date_from).count(),
         }
         
-        # Статистика по лекарствам
         medications_stats = patient.medications.filter(
             taken_at__gte=date_from
         ).values('name').annotate(count=Count('id'))
         
-        # Количество стресс-заметок
         stress_notes_count = patient.stress_notes.filter(
             noted_at__gte=date_from
         ).count()
@@ -206,17 +271,10 @@ class DoctorPatientViewSet(viewsets.ReadOnlyModelViewSet):
         })
 
 
+@extend_schema(tags=['Врач - Данные'])
 class DoctorGlucoseViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    ViewSet для просмотра замеров глюкозы всех пациентов
-    
-    Фильтры:
-    - employee: ID пациента
-    - value_min: минимальное значение глюкозы
-    - value_max: максимальное значение глюкозы
-    - date_from: начальная дата (формат: YYYY-MM-DD)
-    - date_to: конечная дата (формат: YYYY-MM-DD)
-    - search: поиск по имени пациента
+    Просмотр замеров глюкозы всех пациентов
     """
     serializer_class = DoctorGlucoseDetailSerializer
     permission_classes = [IsDoctorPermission]
@@ -229,7 +287,6 @@ class DoctorGlucoseViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         queryset = GlucoseMeasurement.objects.all().select_related('employee__user')
         
-        # Фильтр по значению глюкозы
         value_min = self.request.query_params.get('value_min')
         value_max = self.request.query_params.get('value_max')
         
@@ -238,7 +295,6 @@ class DoctorGlucoseViewSet(viewsets.ReadOnlyModelViewSet):
         if value_max:
             queryset = queryset.filter(value__lte=value_max)
         
-        # Фильтр по датам
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
         
@@ -248,18 +304,37 @@ class DoctorGlucoseViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(measured_at__date__lte=date_to)
         
         return queryset
+    
+    @extend_schema(
+        summary="Замеры глюкозы всех пациентов",
+        description="""
+        Список всех замеров глюкозы с фильтрацией.
+        
+        **Фильтры:**
+        - employee: ID пациента
+        - value_min: минимальное значение глюкозы
+        - value_max: максимальное значение глюкозы
+        - date_from: начальная дата (YYYY-MM-DD)
+        - date_to: конечная дата (YYYY-MM-DD)
+        - search: поиск по имени пациента
+        """,
+        parameters=[
+            OpenApiParameter('employee', OpenApiTypes.INT, description='ID пациента'),
+            OpenApiParameter('value_min', OpenApiTypes.NUMBER, description='Мин. уровень глюкозы'),
+            OpenApiParameter('value_max', OpenApiTypes.NUMBER, description='Макс. уровень глюкозы'),
+            OpenApiParameter('date_from', OpenApiTypes.DATE, description='Дата от'),
+            OpenApiParameter('date_to', OpenApiTypes.DATE, description='Дата до'),
+            OpenApiParameter('search', OpenApiTypes.STR, description='Поиск по имени'),
+        ]
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
 
+@extend_schema(tags=['Врач - Данные'])
 class DoctorEventViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    ViewSet для просмотра событий всех пациентов
-    
-    Фильтры:
-    - employee: ID пациента
-    - type: тип события (meal, walk, sport, other)
-    - date_from: начальная дата
-    - date_to: конечная дата
-    - search: поиск по описанию и имени пациента
+    Просмотр событий всех пациентов
     """
     serializer_class = DoctorEventDetailSerializer
     permission_classes = [IsDoctorPermission]
@@ -272,7 +347,6 @@ class DoctorEventViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         queryset = Event.objects.all().select_related('employee__user').prefetch_related('photos')
         
-        # Фильтр по датам
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
         
@@ -282,18 +356,35 @@ class DoctorEventViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(start_time__date__lte=date_to)
         
         return queryset
+    
+    @extend_schema(
+        summary="События всех пациентов",
+        description="""
+        Список всех событий (еда, прогулки, спорт) с фильтрацией.
+        
+        **Фильтры:**
+        - employee: ID пациента
+        - type: тип события (meal, walk, sport, other)
+        - date_from: начальная дата
+        - date_to: конечная дата
+        - search: поиск по описанию и имени
+        """,
+        parameters=[
+            OpenApiParameter('employee', OpenApiTypes.INT),
+            OpenApiParameter('type', OpenApiTypes.STR, enum=['meal', 'walk', 'sport', 'medicine', 'other']),
+            OpenApiParameter('date_from', OpenApiTypes.DATE),
+            OpenApiParameter('date_to', OpenApiTypes.DATE),
+            OpenApiParameter('search', OpenApiTypes.STR),
+        ]
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
 
+@extend_schema(tags=['Врач - Данные'])
 class DoctorMedicationViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    ViewSet для просмотра лекарств всех пациентов
-    
-    Фильтры:
-    - employee: ID пациента
-    - name: название лекарства (частичное совпадение)
-    - date_from: начальная дата
-    - date_to: конечная дата
-    - search: поиск по названию лекарства и имени пациента
+    Просмотр лекарств всех пациентов
     """
     serializer_class = DoctorMedicationDetailSerializer
     permission_classes = [IsDoctorPermission]
@@ -306,12 +397,10 @@ class DoctorMedicationViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         queryset = Medication.objects.all().select_related('employee__user')
         
-        # Фильтр по названию лекарства
         name = self.request.query_params.get('name')
         if name:
             queryset = queryset.filter(name__icontains=name)
         
-        # Фильтр по датам
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
         
@@ -321,17 +410,24 @@ class DoctorMedicationViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(taken_at__date__lte=date_to)
         
         return queryset
+    
+    @extend_schema(
+        summary="Лекарства всех пациентов",
+        parameters=[
+            OpenApiParameter('employee', OpenApiTypes.INT),
+            OpenApiParameter('name', OpenApiTypes.STR, description='Название лекарства'),
+            OpenApiParameter('date_from', OpenApiTypes.DATE),
+            OpenApiParameter('date_to', OpenApiTypes.DATE),
+        ]
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
 
+@extend_schema(tags=['Врач - Данные'])
 class DoctorStressNoteViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    ViewSet для просмотра заметок о стрессе всех пациентов
-    
-    Фильтры:
-    - employee: ID пациента
-    - date_from: начальная дата
-    - date_to: конечная дата
-    - search: поиск по описанию и имени пациента
+    Просмотр заметок о стрессе всех пациентов
     """
     serializer_class = DoctorStressNoteDetailSerializer
     permission_classes = [IsDoctorPermission]
@@ -344,7 +440,6 @@ class DoctorStressNoteViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         queryset = StressNote.objects.all().select_related('employee__user')
         
-        # Фильтр по датам
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
         
@@ -354,41 +449,81 @@ class DoctorStressNoteViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(noted_at__date__lte=date_to)
         
         return queryset
+    
+    @extend_schema(
+        summary="Заметки о стрессе всех пациентов",
+        parameters=[
+            OpenApiParameter('employee', OpenApiTypes.INT),
+            OpenApiParameter('date_from', OpenApiTypes.DATE),
+            OpenApiParameter('date_to', OpenApiTypes.DATE),
+        ]
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
 
+@extend_schema(tags=['Врач - Дашборд'])
 class DoctorDashboardViewSet(viewsets.ViewSet):
     """
-    ViewSet для дашборда врача с общей статистикой
+    Дашборд врача с общей статистикой
     """
     permission_classes = [IsDoctorPermission]
     
-    def list(self, request):
-        """
-        Общая статистика по всем пациентам
+    @extend_schema(
+        summary="Дашборд врача",
+        description="""
+        Общая статистика по всем пациентам:
         
-        GET /api/doctor/dashboard/
-        """
+        - Количество пациентов (всего и активных)
+        - Средний уровень глюкозы
+        - Общее количество событий
+        - Критические случаи (высокая/низкая глюкоза)
+        """,
+        parameters=[
+            OpenApiParameter(
+                'days',
+                OpenApiTypes.INT,
+                description='Период анализа в днях (по умолчанию 7)',
+                required=False
+            )
+        ],
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "period_days": {"type": "integer"},
+                    "total_patients": {"type": "integer"},
+                    "active_patients": {"type": "integer"},
+                    "avg_glucose": {"type": "number"},
+                    "total_events": {"type": "integer"},
+                    "critical_cases": {
+                        "type": "object",
+                        "properties": {
+                            "high_glucose": {"type": "array"},
+                            "low_glucose": {"type": "array"}
+                        }
+                    }
+                }
+            }
+        }
+    )
+    def list(self, request):
         days = int(request.query_params.get('days', 7))
         date_from = datetime.now() - timedelta(days=days)
         
-        # Общее количество пациентов
         total_patients = Employee.objects.filter(role='user').count()
         
-        # Пациенты с измерениями за период
         active_patients = Employee.objects.filter(
             role='user',
             glucose_measurements__measured_at__gte=date_from
         ).distinct().count()
         
-        # Средний уровень глюкозы по всем пациентам
         avg_glucose = GlucoseMeasurement.objects.filter(
             measured_at__gte=date_from
         ).aggregate(Avg('value'))
         
-        # Общее количество событий
         total_events = Event.objects.filter(start_time__gte=date_from).count()
         
-        # Критические случаи (глюкоза > 10 или < 3)
         critical_high = GlucoseMeasurement.objects.filter(
             measured_at__gte=date_from,
             value__gt=10
@@ -424,7 +559,3 @@ class DoctorDashboardViewSet(viewsets.ViewSet):
                 ]
             }
         })
-
-
-# Добавьте этот импорт в начало файла
-from rest_framework import serializers

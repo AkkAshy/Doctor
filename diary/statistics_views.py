@@ -6,58 +6,19 @@ from datetime import datetime, timedelta
 from django.db.models import Sum, Count, Avg
 from django.utils import timezone
 from django.db.models import Min, Max
+from drf_spectacular.utils import extend_schema, OpenApiParameter
+from drf_spectacular.types import OpenApiTypes
 
 from .models import Event, GlucoseMeasurement
 
 
+@extend_schema(tags=['Статистика'])
 class ActivityStatisticsView(APIView):
     """
-    API для получения статистики активности пациента для графиков
-    
-    GET /api/diary/statistics/activity/
-    
-    Query Parameters:
-    - period: month (по умолчанию), 3months, 6months, year
-    - type: meal, walk, sport, other (опционально, для фильтрации по типу)
-    
-    Response:
-    {
-        "period": "month",
-        "data": [
-            {
-                "type": "meal",
-                "label": "Приемы пищи",
-                "color": "#FF6B6B",
-                "points": [
-                    {"date": "2025-10-01", "value": 5},
-                    {"date": "2025-10-02", "value": 4},
-                    ...
-                ]
-            },
-            {
-                "type": "walk",
-                "label": "Прогулки",
-                "color": "#4ECDC4",
-                "points": [...]
-            },
-            {
-                "type": "sport",
-                "label": "Спорт",
-                "color": "#95E1D3",
-                "points": [...]
-            }
-        ],
-        "totals": {
-            "meal": 122,
-            "walk": 45,
-            "sport": 28,
-            "steps": 23448
-        }
-    }
+    Статистика активности для графиков
     """
     permission_classes = [permissions.IsAuthenticated]
     
-    # Конфигурация типов активности
     ACTIVITY_CONFIG = {
         'meal': {'label': 'Приемы пищи', 'color': '#FF6B6B'},
         'walk': {'label': 'Прогулки', 'color': '#4ECDC4'},
@@ -65,6 +26,76 @@ class ActivityStatisticsView(APIView):
         'other': {'label': 'Другое', 'color': '#A8E6CF'},
     }
     
+    @extend_schema(
+        summary="Статистика активности",
+        description="""
+        Возвращает статистику активности пользователя за выбранный период.
+        
+        Поддерживаемые периоды:
+        - **month** (30 дней) - по умолчанию
+        - **3months** (90 дней)
+        - **6months** (180 дней)
+        - **year** (365 дней)
+        
+        Можно фильтровать по типу активности.
+        """,
+        parameters=[
+            OpenApiParameter(
+                name='period',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Период: month, 3months, 6months, year',
+                enum=['month', '3months', '6months', 'year']
+            ),
+            OpenApiParameter(
+                name='type',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Тип активности: meal, walk, sport, other',
+                enum=['meal', 'walk', 'sport', 'other'],
+                required=False
+            )
+        ],
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string", "example": "month"},
+                    "days": {"type": "integer", "example": 30},
+                    "data": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string"},
+                                "label": {"type": "string"},
+                                "color": {"type": "string"},
+                                "points": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "date": {"type": "string", "format": "date"},
+                                            "value": {"type": "integer"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "totals": {
+                        "type": "object",
+                        "properties": {
+                            "meal": {"type": "integer"},
+                            "walk": {"type": "integer"},
+                            "sport": {"type": "integer"},
+                            "steps": {"type": "integer"}
+                        }
+                    }
+                }
+            }
+        }
+    )
     def get(self, request):
         employee = request.user.employee
         period = request.query_params.get('period', 'month')
@@ -94,7 +125,6 @@ class ActivityStatisticsView(APIView):
             if not type_events.exists():
                 continue
 
-            # Цвет берем из первого события типа
             color = type_events.first().color or '#CCCCCC'
             label = self.ACTIVITY_CONFIG.get(event_type, {}).get('label', event_type.title())
             points = self._group_by_date(type_events, start_date, end_date)
@@ -120,16 +150,11 @@ class ActivityStatisticsView(APIView):
             'totals': totals
         })
 
-    
     def _group_by_date(self, queryset, start_date, end_date):
-        """
-        Группирует события по датам и возвращает массив точек для графика
-        """
         points = []
         current_date = start_date.date()
         end = end_date.date()
         
-        # Создаем словарь для быстрого доступа
         events_by_date = {}
         for event in queryset:
             date_key = event.start_time.date()
@@ -137,7 +162,6 @@ class ActivityStatisticsView(APIView):
                 events_by_date[date_key] = 0
             events_by_date[date_key] += 1
         
-        # Заполняем все дни периода
         while current_date <= end:
             points.append({
                 'date': current_date.strftime('%Y-%m-%d'),
@@ -148,61 +172,79 @@ class ActivityStatisticsView(APIView):
         return points
 
 
+@extend_schema(tags=['Статистика'])
 class GlucoseStatisticsView(APIView):
     """
-    API для получения статистики уровня глюкозы для графиков
-    
-    GET /api/diary/statistics/glucose/
-    
-    Query Parameters:
-    - period: month (по умолчанию), 3months, 6months, year
-    
-    Response:
-    {
-        "period": "month",
-        "data": {
-            "points": [
-                {"date": "2025-10-01", "value": 5.8},
-                {"date": "2025-10-02", "value": 6.2},
-                ...
-            ],
-            "average": 5.9,
-            "min": 4.2,
-            "max": 8.1,
-            "measurements_count": 90
-        }
-    }
+    Статистика уровня глюкозы
     """
     permission_classes = [permissions.IsAuthenticated]
     
+    @extend_schema(
+        summary="Статистика глюкозы",
+        description="""
+        Возвращает статистику уровня глюкозы за выбранный период:
+        
+        - Временной ряд значений (среднее за день)
+        - Средний уровень
+        - Минимум и максимум
+        - Количество измерений
+        """,
+        parameters=[
+            OpenApiParameter(
+                name='period',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Период: month, 3months, 6months, year',
+                enum=['month', '3months', '6months', 'year']
+            )
+        ],
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string"},
+                    "days": {"type": "integer"},
+                    "data": {
+                        "type": "object",
+                        "properties": {
+                            "points": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "date": {"type": "string", "format": "date"},
+                                        "value": {"type": "number"}
+                                    }
+                                }
+                            },
+                            "average": {"type": "number", "example": 5.8},
+                            "min": {"type": "number", "example": 4.2},
+                            "max": {"type": "number", "example": 9.5},
+                            "measurements_count": {"type": "integer"}
+                        }
+                    }
+                }
+            }
+        }
+    )
     def get(self, request):
         employee = request.user.employee
         period = request.query_params.get('period', 'month')
         
-        # Определяем период
-        days_map = {
-            'month': 30,
-            '3months': 90,
-            '6months': 180,
-            'year': 365
-        }
+        days_map = {'month': 30, '3months': 90, '6months': 180, 'year': 365}
         days = days_map.get(period, 30)
         
-        # Дата начала периода
         end_date = timezone.now()
         start_date = end_date - timedelta(days=days)
         
-        # Получаем замеры за период
         measurements = GlucoseMeasurement.objects.filter(
             employee=employee,
             measured_at__gte=start_date,
             measured_at__lte=end_date
         ).order_by('measured_at')
         
-        # Группируем по датам (берем среднее значение за день)
         points = self._group_by_date(measurements, start_date, end_date)
         
-        # Статистика
         stats = measurements.aggregate(
             avg=Avg('value'),
             min=Min('value'),
@@ -223,23 +265,17 @@ class GlucoseStatisticsView(APIView):
         })
     
     def _group_by_date(self, queryset, start_date, end_date):
-        """
-        Группирует замеры по датам и возвращает среднее значение за день
-        """
-        from django.db.models import Avg
         from collections import defaultdict
         
         points = []
         current_date = start_date.date()
         end = end_date.date()
         
-        # Группируем по датам
         measurements_by_date = defaultdict(list)
         for measurement in queryset:
             date_key = measurement.measured_at.date()
             measurements_by_date[date_key].append(measurement.value)
         
-        # Заполняем все дни периода
         while current_date <= end:
             values = measurements_by_date.get(current_date, [])
             avg_value = sum(values) / len(values) if values else None
@@ -255,47 +291,10 @@ class GlucoseStatisticsView(APIView):
         return points
 
 
+@extend_schema(tags=['Статистика'])
 class NutritionStatisticsView(APIView):
     """
-    API для получения статистики питания (калории, углеводы, сахар)
-    
-    GET /api/diary/statistics/nutrition/
-    
-    Query Parameters:
-    - period: month (по умолчанию), 3months, 6months, year
-    
-    Response:
-    {
-        "period": "month",
-        "data": [
-            {
-                "type": "calories",
-                "label": "Калории",
-                "color": "#FF6B6B",
-                "points": [
-                    {"date": "2025-10-01", "value": 1850},
-                    ...
-                ]
-            },
-            {
-                "type": "carbs",
-                "label": "Углеводы",
-                "color": "#4ECDC4",
-                "points": [...]
-            },
-            {
-                "type": "sugars",
-                "label": "Сахара",
-                "color": "#FFD93D",
-                "points": [...]
-            }
-        ],
-        "totals": {
-            "calories": 55500,
-            "carbs": 4200,
-            "sugars": 780
-        }
-    }
+    Статистика питания (калории, углеводы, сахара)
     """
     permission_classes = [permissions.IsAuthenticated]
     
@@ -305,24 +304,65 @@ class NutritionStatisticsView(APIView):
         'sugars': {'label': 'Сахара (г)', 'color': '#FFD93D', 'field': 'sugars'},
     }
     
+    @extend_schema(
+        summary="Статистика питания",
+        description="""
+        Возвращает статистику питания за период:
+        
+        - Калории по дням
+        - Углеводы по дням
+        - Сахара по дням
+        - Общие суммы
+        """,
+        parameters=[
+            OpenApiParameter(
+                name='period',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Период: month, 3months, 6months, year',
+                enum=['month', '3months', '6months', 'year']
+            )
+        ],
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string"},
+                    "days": {"type": "integer"},
+                    "data": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string"},
+                                "label": {"type": "string"},
+                                "color": {"type": "string"},
+                                "points": {"type": "array"}
+                            }
+                        }
+                    },
+                    "totals": {
+                        "type": "object",
+                        "properties": {
+                            "calories": {"type": "number"},
+                            "carbs": {"type": "number"},
+                            "sugars": {"type": "number"}
+                        }
+                    }
+                }
+            }
+        }
+    )
     def get(self, request):
         employee = request.user.employee
         period = request.query_params.get('period', 'month')
         
-        # Определяем период
-        days_map = {
-            'month': 30,
-            '3months': 90,
-            '6months': 180,
-            'year': 365
-        }
+        days_map = {'month': 30, '3months': 90, '6months': 180, 'year': 365}
         days = days_map.get(period, 30)
         
-        # Дата начала периода
         end_date = timezone.now()
         start_date = end_date - timedelta(days=days)
         
-        # Получаем только события типа meal
         meals = Event.objects.filter(
             employee=employee,
             type='meal',
@@ -330,17 +370,14 @@ class NutritionStatisticsView(APIView):
             start_time__lte=end_date
         )
         
-        # Подготовка данных
         data = []
         totals = {}
         
         for nutr_type, config in self.NUTRITION_CONFIG.items():
             field_name = config['field']
             
-            # Группируем по датам
             points = self._group_by_date_nutrition(meals, start_date, end_date, field_name)
             
-            # Подсчитываем общую сумму
             total = meals.aggregate(Sum(field_name))[f'{field_name}__sum'] or 0
             totals[nutr_type] = round(total, 2)
             
@@ -359,23 +396,18 @@ class NutritionStatisticsView(APIView):
         })
     
     def _group_by_date_nutrition(self, queryset, start_date, end_date, field_name):
-        """
-        Группирует приемы пищи по датам и суммирует значения
-        """
         from collections import defaultdict
         
         points = []
         current_date = start_date.date()
         end = end_date.date()
         
-        # Группируем по датам
         values_by_date = defaultdict(float)
         for meal in queryset:
             date_key = meal.start_time.date()
             value = getattr(meal, field_name, 0) or 0
             values_by_date[date_key] += value
         
-        # Заполняем все дни периода
         while current_date <= end:
             value = values_by_date.get(current_date, 0)
             
@@ -388,5 +420,3 @@ class NutritionStatisticsView(APIView):
             current_date += timedelta(days=1)
         
         return points
-
-

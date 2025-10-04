@@ -1,27 +1,63 @@
 # auth/views.py
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status, permissions, viewsets
-from rest_framework.decorators import action
+from rest_framework import status, permissions
 from django.contrib.auth import authenticate
 from django.utils.translation import gettext_lazy as _
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
+from drf_spectacular.types import OpenApiTypes
+
 from .models import Employee, TelegramAuthCode, HealthRecommendation
 from .serializers import UserSerializer, HealthRecommendationSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from .tasks import get_comprehensive_analysis
 import logging
 
-
 logger = logging.getLogger(__name__)
 
 
 class HealthRecommendationView(APIView):
     """
-    Генерирует рекомендации на лету без сохранения
-    GET /api/users/recomended/
+    Генерация персонализированных рекомендаций с AI анализом
     """
     permission_classes = [permissions.IsAuthenticated]
 
+    @extend_schema(
+        tags=['AI Рекомендации'],
+        summary="Получить AI рекомендации",
+        description="""
+        Генерирует персонализированные рекомендации на основе данных пользователя за последнюю неделю:
+        
+        - Анализ уровня глюкозы
+        - Влияние питания и активности
+        - Прогноз на следующую неделю
+        - Персональные советы
+        
+        **ВАЖНО**: Анализ использует OpenAI GPT-4, поэтому запрос может занять 5-15 секунд.
+        """,
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "analysis": {
+                        "type": "string",
+                        "description": "Текстовый анализ и рекомендации от AI"
+                    },
+                    "chart_data": {
+                        "type": "object",
+                        "description": "Прогноз глюкозы на 7 дней",
+                        "example": {
+                            "2025-10-06": 5.2,
+                            "2025-10-07": 5.5,
+                            "2025-10-08": 5.8
+                        }
+                    }
+                }
+            },
+            404: {"description": "Профиль сотрудника не найден"},
+            500: {"description": "Ошибка генерации анализа"}
+        }
+    )
     def get(self, request):
         employee = getattr(request.user, "employee", None)
         if not employee:
@@ -32,7 +68,6 @@ class HealthRecommendationView(APIView):
 
         try:
             result = get_comprehensive_analysis(employee)
-
             return Response({
                 "analysis": result["analysis"],
                 "chart_data": result["chart_data"]
@@ -45,28 +80,48 @@ class HealthRecommendationView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+
 class RegisterView(APIView):
+    """
+    Регистрация нового пользователя
+    """
     permission_classes = [permissions.AllowAny]
 
+    @extend_schema(
+        tags=['Авторизация'],
+        summary="Регистрация пользователя",
+        description="Создает нового пользователя с профилем Employee и возвращает JWT токены",
+        request=UserSerializer,
+        responses={
+            201: {
+                "type": "object",
+                "properties": {
+                    "refresh": {"type": "string", "description": "JWT Refresh Token"},
+                    "access": {"type": "string", "description": "JWT Access Token"},
+                    "user": {"type": "object", "description": "Данные пользователя"}
+                }
+            },
+            400: {"description": "Ошибка валидации данных"}
+        },
+        examples=[
+            OpenApiExample(
+                "Пример регистрации",
+                value={
+                    "username": "ivan_petrov",
+                    "email": "ivan@example.com",
+                    "password": "SecurePass123",
+                    "first_name": "Иван",
+                    "last_name": "Петров",
+                    "employee": {
+                        "role": "user",
+                        "phone": "+998901234567"
+                    }
+                },
+                request_only=True
+            )
+        ]
+    )
     def post(self, request):
-        """
-        Регистрация нового пользователя.
-
-        Параметры:
-        - username (str)
-        - email (str)
-        - password (str)
-        - first_name (str)
-        - last_name (str)
-        - employee (dict):
-            - role (str)
-            - phone (str)
-            - photo (file)
-
-        Возвращает:
-        - access/refresh JWT токены
-        - данные пользователя
-        """
         serializer = UserSerializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
@@ -80,13 +135,29 @@ class RegisterView(APIView):
 
 
 class TelegramProfileView(APIView):
+    """
+    Получение профиля по Telegram ID
+    """
     permission_classes = [permissions.AllowAny]
 
+    @extend_schema(
+        tags=['Telegram'],
+        summary="Получить профиль по Telegram ID",
+        description="Возвращает профиль пользователя, привязанный к указанному Telegram ID",
+        parameters=[
+            OpenApiParameter(
+                name='telegram_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.PATH,
+                description='Telegram ID пользователя'
+            )
+        ],
+        responses={
+            200: UserSerializer,
+            404: {"description": "Профиль не найден"}
+        }
+    )
     def get(self, request, telegram_id):
-        """
-        Получить профиль пользователя по Telegram ID
-        GET /api/users/telegram/profile/<telegram_id>/
-        """
         try:
             employee = Employee.objects.select_related("user").get(telegram_id=telegram_id)
             serializer = UserSerializer(employee.user)
@@ -96,58 +167,40 @@ class TelegramProfileView(APIView):
 
 
 class GetProfileView(APIView):
+    """
+    Получение данных текущего пользователя
+    """
     permission_classes = [permissions.IsAuthenticated]
 
+    @extend_schema(
+        tags=['Авторизация'],
+        summary="Мой профиль",
+        description="Возвращает данные авторизованного пользователя",
+        responses={200: UserSerializer}
+    )
     def get(self, request):
-        """
-        Получение данных о пользователе.
-
-        GET /api/users/profile/
-        """
         user = request.user
         serializer = UserSerializer(user)
         return Response(serializer.data)
 
 
 class ProfileUpdateView(APIView):
+    """
+    Обновление профиля пользователя
+    """
     permission_classes = [permissions.IsAuthenticated]
 
+    @extend_schema(
+        tags=['Авторизация'],
+        summary="Обновить профиль",
+        description="Обновляет данные профиля текущего пользователя",
+        request=UserSerializer,
+        responses={
+            200: UserSerializer,
+            400: {"description": "Ошибка валидации"}
+        }
+    )
     def put(self, request):
-        """
-        Обновление профиля пользователя
-
-        PUT /api/users/profile/
-
-        Request Body:
-            {
-                "username": "string",
-                "email": "string",
-                "first_name": "string",
-                "last_name": "string",
-                "employee": {
-                    "role": "string",
-                    "phone": "string",
-                    "photo": "string"
-                }
-            }
-
-        Response:
-            200: {
-                "id": integer,
-                "username": "string",
-                "email": "string",
-                "first_name": "string",
-                "last_name": "string",
-                "employee": {
-                    "role": "string",
-                    "phone": "string",
-                    "photo": "string"
-                }
-            }
-            400: {
-                "error": "string"
-            }
-        """
         user = request.user
         serializer = UserSerializer(user, data=request.data, partial=True)
         if serializer.is_valid():
@@ -157,14 +210,31 @@ class ProfileUpdateView(APIView):
 
 
 class GenerateTelegramCodeView(APIView):
+    """
+    Генерация кода для привязки Telegram
+    """
     permission_classes = [permissions.IsAuthenticated]
 
+    @extend_schema(
+        tags=['Telegram'],
+        summary="Сгенерировать код для Telegram",
+        description="""
+        Генерирует уникальный код для привязки аккаунта к Telegram боту.
+        
+        Код действителен 30 минут.
+        """,
+        responses={
+            201: {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "example": "ABC123"},
+                    "link": {"type": "string", "example": "https://t.me/Gluzone_Bot?start=ABC123"}
+                }
+            },
+            500: {"description": "Бот не настроен на сервере"}
+        }
+    )
     def get(self, request):
-        """
-        Генерация кода для привязки Telegram
-
-        GET /api/users/telegram/generate-code/
-        """
         from django.conf import settings
 
         user = request.user
@@ -183,20 +253,37 @@ class GenerateTelegramCodeView(APIView):
 
 
 class ConfirmTelegramCodeView(APIView):
+    """
+    Подтверждение кода и привязка Telegram
+    """
     permission_classes = [permissions.AllowAny]
 
-    def post(self, request):
-        """
-        Подтверждение кода и привязка Telegram ID
-
-        POST /api/users/telegram/confirm-code/
-
-        Request Body:
-        {
-            "code": "string",
-            "telegram_id": "string"
+    @extend_schema(
+        tags=['Telegram'],
+        summary="Подтвердить код Telegram",
+        description="Привязывает Telegram ID к аккаунту пользователя и возвращает JWT токены",
+        request={
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "example": "ABC123"},
+                "telegram_id": {"type": "string", "example": "123456789"}
+            },
+            "required": ["code", "telegram_id"]
+        },
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "access": {"type": "string"},
+                    "refresh": {"type": "string"},
+                    "user": {"type": "object"}
+                }
+            },
+            400: {"description": "Неверный или просроченный код"}
         }
-        """
+    )
+    def post(self, request):
         code = request.data.get("code")
         telegram_id = request.data.get("telegram_id")
 
