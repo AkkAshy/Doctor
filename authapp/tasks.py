@@ -1,8 +1,10 @@
+# authapp/tasks.py
 import datetime
 from django.utils import timezone
 from django.conf import settings
 from diary.models import GlucoseMeasurement, Event, Medication, StressNote
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +19,6 @@ def get_openai_client():
         from openai import OpenAI
         import os
         
-        # Пробуем получить ключ разными способами
         api_key = getattr(settings, 'OPENAI_API_KEY', None)
         
         if not api_key:
@@ -38,19 +39,19 @@ def get_openai_client():
 
 def get_comprehensive_analysis(employee):
     """
-    Эпичная функция, которая делает всё сразу:
-    - Собирает данные за 30 дней
-    - Анализирует тренды с OpenAI
-    - Генерирует рекомендации
-    - Возвращает данные для графика
-
+    Анализ данных пользователя за НЕДЕЛЮ с предсказанием тренда глюкозы на следующую неделю
+    
     Возвращает словарь:
     {
-        "analysis": "Текст анализа и рекомендаций",
+        "analysis": "Текст анализа и рекомендаций от GPT",
         "chart_data": {
-            "labels": ["2025-09-04 10:00", ...],
-            "glucose_values": [5.5, 6.2, ...],
-            "normal_range": {"min": 4, "max": 11}
+            "2025-10-06": 5.2,
+            "2025-10-07": 5.5,
+            "2025-10-08": 5.8,
+            "2025-10-09": 5.6,
+            "2025-10-10": 5.4,
+            "2025-10-11": 5.3,
+            "2025-10-12": 5.7
         }
     }
     """
@@ -59,31 +60,31 @@ def get_comprehensive_analysis(employee):
         logger.info(f"Starting comprehensive analysis for employee {employee.id} ({employee.user.username})")
         
         now = timezone.now()
-        start_month = now - datetime.timedelta(days=30)
+        start_week = now - datetime.timedelta(days=7)  # ← ИЗМЕНЕНО: неделя вместо месяца
         
-        logger.info(f"Date range: {start_month.strftime('%Y-%m-%d')} to {now.strftime('%Y-%m-%d')}")
+        logger.info(f"Date range: {start_week.strftime('%Y-%m-%d')} to {now.strftime('%Y-%m-%d')}")
 
-        # 1. СОБИРАЕМ ВСЕ ДАННЫЕ ЗА МЕСЯЦ
+        # 1. СОБИРАЕМ ВСЕ ДАННЫЕ ЗА НЕДЕЛЮ
         logger.info("Collecting data from database...")
         
         glucose_qs = GlucoseMeasurement.objects.filter(
             employee=employee,
-            measured_at__gte=start_month
+            measured_at__gte=start_week
         ).order_by("measured_at")
 
         events_qs = Event.objects.filter(
             employee=employee,
-            start_time__gte=start_month
+            start_time__gte=start_week
         ).order_by("start_time")
 
         meds_qs = Medication.objects.filter(
             employee=employee,
-            taken_at__gte=start_month
+            taken_at__gte=start_week
         ).order_by("taken_at")
 
         stress_qs = StressNote.objects.filter(
             employee=employee,
-            noted_at__gte=start_month
+            noted_at__gte=start_week
         ).order_by("noted_at")
 
         glucose_count = glucose_qs.count()
@@ -101,13 +102,16 @@ def get_comprehensive_analysis(employee):
         logger.info("Formatting data for analysis...")
         
         glucose_data = [{
-            "time": g.measured_at.strftime("%Y-%m-%d %H:%M"),
+            "date": g.measured_at.strftime("%Y-%m-%d"),
+            "time": g.measured_at.strftime("%H:%M"),
             "value": float(g.value)
         } for g in glucose_qs]
 
         events_data = [{
-            "time": e.start_time.strftime("%Y-%m-%d %H:%M"),
+            "date": e.start_time.strftime("%Y-%m-%d"),
+            "time": e.start_time.strftime("%H:%M"),
             "type": e.type,
+            "name": e.name,
             "desc": e.description,
             "calories": e.calories,
             "carbs": e.carbs,
@@ -117,13 +121,15 @@ def get_comprehensive_analysis(employee):
         } for e in events_qs]
 
         meds_data = [{
-            "time": m.taken_at.strftime("%Y-%m-%d %H:%M"),
+            "date": m.taken_at.strftime("%Y-%m-%d"),
+            "time": m.taken_at.strftime("%H:%M"),
             "name": m.name,
             "dosage": m.dose
         } for m in meds_qs]
 
         stress_data = [{
-            "time": s.noted_at.strftime("%Y-%m-%d %H:%M"),
+            "date": s.noted_at.strftime("%Y-%m-%d"),
+            "time": s.noted_at.strftime("%H:%M"),
             "note": s.description
         } for s in stress_qs]
 
@@ -132,20 +138,23 @@ def get_comprehensive_analysis(employee):
         # 3. ПРОВЕРКА НА НАЛИЧИЕ ДАННЫХ
         if not glucose_data and not events_data:
             logger.warning(f"Insufficient data for employee {employee.id} - no glucose or events found")
+            
+            # Генерируем пустой прогноз на неделю
+            empty_forecast = {}
+            for i in range(7):
+                future_date = (now + datetime.timedelta(days=i+1)).strftime("%Y-%m-%d")
+                empty_forecast[future_date] = None
+            
             return {
                 "analysis": (
-                    "❌ Недостаточно данных за последний месяц для анализа.\n\n"
-                    "Для получения персонализированных рекомендаций добавьте:\n"
+                    "❌ Недостаточно данных за последнюю неделю для анализа.\n\n"
+                    "Для получения персонализированных рекомендаций и прогноза добавьте:\n"
                     "• Измерения уровня глюкозы\n"
                     "• События (приёмы пищи, физическая активность)\n"
                     "• Информацию о принятых лекарствах\n"
                     "• Заметки о стрессе и самочувствии"
                 ),
-                "chart_data": {
-                    "labels": [],
-                    "glucose_values": [],
-                    "normal_range": {"min": 4, "max": 11}
-                }
+                "chart_data": empty_forecast
             }
 
         # 4. АНАЛИЗ С ОТКЛОНЕНИЯМИ
@@ -163,52 +172,103 @@ def get_comprehensive_analysis(employee):
         if low_glucose:
             deviations_text += f"\n⚠️ Обнаружено {len(low_glucose)} случаев пониженного уровня глюкозы (<4 ммоль/л)."
 
-        # 5. СОЗДАЁМ ПРОМПТ ДЛЯ OPENAI
+        # 5. ВЫЧИСЛЯЕМ СРЕДНИЕ ЗНАЧЕНИЯ ПО ДНЯМ
+        from collections import defaultdict
+        daily_glucose = defaultdict(list)
+        for g in glucose_data:
+            daily_glucose[g["date"]].append(g["value"])
+        
+        daily_averages = {
+            date: round(sum(values) / len(values), 1)
+            for date, values in daily_glucose.items()
+        }
+        
+        logger.info(f"Daily averages calculated: {daily_averages}")
+
+        # 6. ГЕНЕРИРУЕМ ДАТЫ ДЛЯ ПРОГНОЗА (следующие 7 дней)
+        forecast_dates = []
+        for i in range(7):
+            future_date = (now + datetime.timedelta(days=i+1)).strftime("%Y-%m-%d")
+            forecast_dates.append(future_date)
+        
+        logger.info(f"Forecast dates: {forecast_dates}")
+
+        # 7. СОЗДАЁМ ПРОМПТ ДЛЯ OPENAI С ЗАПРОСОМ НА ПРОГНОЗ
         logger.info("Creating prompt for OpenAI...")
         
         prompt = f"""
-Проанализируй данные пользователя с диабетом за последние 30 дней:
+                Проанализируй данные пользователя с диабетом за последние 7 дней и составь прогноз на следующую неделю:
 
-ГЛЮКОЗА: {glucose_data if glucose_data else "данные отсутствуют"}
+                ДАННЫЕ ЗА ПРОШЕДШУЮ НЕДЕЛЮ:
 
-СОБЫТИЯ (еда, активность): {events_data if events_data else "данные отсутствуют"}
+                ГЛЮКОЗА (по дням):
+                {json.dumps(daily_averages, ensure_ascii=False, indent=2)}
 
-ЛЕКАРСТВА: {meds_data if meds_data else "данные отсутствуют"}
+                ДЕТАЛЬНЫЕ ИЗМЕРЕНИЯ:
+                {glucose_data if glucose_data else "данные отсутствуют"}
 
-СТРЕСС: {stress_data if stress_data else "данные отсутствуют"}
+                СОБЫТИЯ (еда, активность):
+                {events_data if events_data else "данные отсутствуют"}
 
-{deviations_text}
+                ЛЕКАРСТВА:
+                {meds_data if meds_data else "данные отсутствуют"}
 
-Составь подробный анализ и рекомендации:
+                СТРЕСС:
+                {stress_data if stress_data else "данные отсутствуют"}
 
-1. **ТРЕНДЫ ГЛЮКОЗЫ** (100-150 слов):
-   - Общая динамика за месяц (стабильная/растущая/падающая)
-   - Средний уровень и диапазон колебаний
-   - Паттерны (время суток, дни недели)
+                {deviations_text}
 
-2. **ВЛИЯНИЕ ФАКТОРОВ** (100-150 слов):
-   - Как еда влияет на уровень глюкозы (углеводы, сахара)
-   - Влияние физической активности (калории, шаги, длительность)
-   - Влияние стресса и лекарств
+                ЗАДАЧА:
+                1. Проанализируй тренды и паттерны за неделю
+                2. Дай персональные рекомендации
+                3. ОБЯЗАТЕЛЬНО составь прогноз среднего уровня глюкозы на каждый из следующих 7 дней: {', '.join(forecast_dates)}
 
-3. **ПРОГНОЗ НА 7 ДНЕЙ** (50-100 слов):
-   - Ожидаемая динамика на основе текущих трендов
-   - Риски и на что обратить внимание
+                ФОРМАТ ОТВЕТА:
 
-4. **ПЕРСОНАЛЬНЫЕ РЕКОМЕНДАЦИИ** (150-200 слов):
-   - Питание: конкретные продукты и время приёма пищи
-   - Активность: типы упражнений, интенсивность, время
-   - Сон и стресс: методы релаксации, режим
-   - Если есть отклонения глюкозы, дай конкретные действия
+                ## 📊 АНАЛИЗ ЗА НЕДЕЛЮ (100-150 слов)
+                - Общая динамика уровня глюкозы
+                - Средний уровень и диапазон колебаний
+                - Выявленные паттерны (время суток, связь с едой/активностью)
 
-Если данных мало, укажи это и дай общие рекомендации для контроля диабета.
-Ответ структурируй с заголовками, используй эмодзи для наглядности.
-Максимум 500 слов.
-"""
+                ## 🎯 ВЛИЯНИЕ ФАКТОРОВ (100-150 слов)
+                - Как питание влияло на глюкозу
+                - Влияние физической активности
+                - Влияние стресса и лекарств
+
+                ## 🔮 ПРОГНОЗ НА НЕДЕЛЮ (50-100 слов)
+                - Ожидаемая динамика
+                - Риски и на что обратить внимание
+                - Рекомендации на основе прогноза
+
+                ## 💡 ПЕРСОНАЛЬНЫЕ РЕКОМЕНДАЦИИ (150-200 слов)
+                - Питание: конкретные продукты и время
+                - Активность: типы, интенсивность, время
+                - Режим дня и управление стрессом
+                - Корректировка лекарств (если нужно)
+
+                ## 📈 ПРОГНОЗ ГЛЮКОЗЫ (ОБЯЗАТЕЛЬНО!)
+                Верни ТОЛЬКО JSON с прогнозом среднего уровня глюкозы на каждый день:
+                ```json{{
+                "{forecast_dates[0]}": 5.5,
+                "{forecast_dates[1]}": 5.8,
+                "{forecast_dates[2]}": 5.6,
+                "{forecast_dates[3]}": 5.9,
+                "{forecast_dates[4]}": 5.7,
+                "{forecast_dates[5]}": 5.4,
+                "{forecast_dates[6]}": 5.6
+                }}
+
+                ВАЖНО: 
+                - Значения должны быть реалистичными (4-11 ммоль/л)
+                - Учитывай выявленные тренды
+                - Прогноз должен быть в отдельном JSON блоке
+                - Используй эмодзи для наглядности
+                - Максимум 500 слов для текста
+                """
 
         logger.info(f"Prompt length: {len(prompt)} characters")
 
-        # 6. ЗАПРОС К OPENAI
+        # 8. ЗАПРОС К OPENAI
         logger.info("Calling OpenAI API...")
         
         try:
@@ -221,9 +281,11 @@ def get_comprehensive_analysis(employee):
                     {
                         "role": "system",
                         "content": (
-                            "Ты — медицинский помощник и эксперт по диабету. "
-                            "Анализируй данные профессионально, давай конкретные, "
-                            "персонализированные рекомендации. Будь понятным и поддерживающим."
+                            "Ты — медицинский помощник и эксперт по диабету с навыками прогнозирования. "
+                            "Анализируй данные профессионально, давай конкретные рекомендации. "
+                            "ОБЯЗАТЕЛЬНО включай JSON прогноз глюкозы на 7 дней в формате:\n"
+                            '{"YYYY-MM-DD": число, ...}\n'
+                            "Будь понятным и поддерживающим."
                         )
                     },
                     {"role": "user", "content": prompt}
@@ -233,32 +295,114 @@ def get_comprehensive_analysis(employee):
             
             logger.info("OpenAI API call completed successfully")
             
-            analysis_text = response.choices[0].message.content.strip()
-            logger.info(f"Analysis text length: {len(analysis_text)} characters")
+            full_response = response.choices[0].message.content.strip()
+            logger.info(f"Full response length: {len(full_response)} characters")
             
         except Exception as openai_error:
             logger.error(f"OpenAI API error: {type(openai_error).__name__}")
             logger.error(f"Error details: {str(openai_error)}")
             raise
 
-        # 7. ПОДГОТОВКА ДАННЫХ ДЛЯ ГРАФИКА
-        logger.info("Preparing chart data...")
+        # 9. ИЗВЛЕКАЕМ ПРОГНОЗ ИЗ ОТВЕТА
+        logger.info("Extracting forecast from response...")
         
-        chart_data = {
-            "labels": [g["time"] for g in glucose_data],
-            "glucose_values": [g["value"] for g in glucose_data],
-            "normal_range": {"min": 4, "max": 11}
-        }
+        forecast_data = {}
+        analysis_text = full_response
         
-        logger.info(f"Chart data prepared: {len(chart_data['labels'])} data points")
+        try:
+            # Ищем JSON блок в ответе
+            import re
+            
+            # Паттерны для поиска JSON
+            patterns = [
+                r'```json\s*(\{[^}]+\})\s*```',  # ```json {...} ```
+                r'```\s*(\{[^}]+\})\s*```',      # ``` {...} ```
+                r'\{["\']?\d{4}-\d{2}-\d{2}["\']?\s*:\s*\d+\.?\d*[^}]*\}',  # {"YYYY-MM-DD": число}
+            ]
+            
+            json_match = None
+            for pattern in patterns:
+                json_match = re.search(pattern, full_response, re.DOTALL)
+                if json_match:
+                    break
+            
+            if json_match:
+                json_str = json_match.group(1) if len(json_match.groups()) > 0 else json_match.group(0)
+                json_str = json_str.strip()
+                
+                logger.info(f"Found JSON block: {json_str[:100]}...")
+                
+                # Парсим JSON
+                forecast_data = json.loads(json_str)
+                
+                # Удаляем JSON блок из текста анализа
+                analysis_text = full_response.replace(json_match.group(0), '').strip()
+                
+                logger.info(f"✅ Forecast extracted successfully: {forecast_data}")
+            else:
+                logger.warning("Could not find forecast JSON in response")
+                
+                # Генерируем дефолтный прогноз на основе средних значений
+                if daily_averages:
+                    avg_glucose = sum(daily_averages.values()) / len(daily_averages)
+                else:
+                    avg_glucose = 5.5
+                
+                for date in forecast_dates:
+                    # Небольшие случайные колебания вокруг среднего
+                    import random
+                    variation = random.uniform(-0.5, 0.5)
+                    forecast_data[date] = round(avg_glucose + variation, 1)
+                
+                logger.info(f"Generated default forecast: {forecast_data}")
+        
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse forecast JSON: {e}")
+            
+            # Генерируем дефолтный прогноз
+            if daily_averages:
+                avg_glucose = sum(daily_averages.values()) / len(daily_averages)
+            else:
+                avg_glucose = 5.5
+            
+            for date in forecast_dates:
+                forecast_data[date] = round(avg_glucose, 1)
+            
+            logger.info(f"Using default forecast due to parse error: {forecast_data}")
+        
+        except Exception as e:
+            logger.error(f"Error extracting forecast: {e}", exc_info=True)
+            
+            # Дефолтный прогноз в случае ошибки
+            for date in forecast_dates:
+                forecast_data[date] = 5.5
+
+        # 10. ВАЛИДАЦИЯ ПРОГНОЗА
+        logger.info("Validating forecast data...")
+        
+        validated_forecast = {}
+        for date in forecast_dates:
+            if date in forecast_data:
+                value = forecast_data[date]
+                # Проверяем, что значение в разумных пределах (3-15 ммоль/л)
+                if isinstance(value, (int, float)) and 3 <= value <= 15:
+                    validated_forecast[date] = round(float(value), 1)
+                else:
+                    logger.warning(f"Invalid forecast value for {date}: {value}, using 5.5")
+                    validated_forecast[date] = 5.5
+            else:
+                logger.warning(f"Missing forecast for {date}, using 5.5")
+                validated_forecast[date] = 5.5
+        
+        logger.info(f"Validated forecast: {validated_forecast}")
 
         logger.info(f"✅ Comprehensive analysis completed successfully for employee {employee.id}")
         logger.info(f"=" * 50)
 
-        # 8. ВОЗВРАЩАЕМ РЕЗУЛЬТАТ
+        # 11. ВОЗВРАЩАЕМ РЕЗУЛЬТАТ
         return {
             "analysis": analysis_text,
-            "chart_data": chart_data
+            "chart_data": validated_forecast
         }
 
     except Exception as e:
@@ -267,6 +411,13 @@ def get_comprehensive_analysis(employee):
         logger.error(f"Error message: {str(e)}")
         logger.error(f"Full traceback:", exc_info=True)
         logger.error(f"=" * 50)
+        
+        # Генерируем дефолтный прогноз даже при ошибке
+        now = timezone.now()
+        error_forecast = {}
+        for i in range(7):
+            future_date = (now + datetime.timedelta(days=i+1)).strftime("%Y-%m-%d")
+            error_forecast[future_date] = 5.5
         
         return {
             "analysis": (
@@ -279,9 +430,5 @@ def get_comprehensive_analysis(employee):
                 f"Детали: {str(e)}\n\n"
                 "Попробуйте позже или обратитесь в поддержку."
             ),
-            "chart_data": {
-                "labels": [],
-                "glucose_values": [],
-                "normal_range": {"min": 4, "max": 11}
-            }
+            "chart_data": error_forecast
         }

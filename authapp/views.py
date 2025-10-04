@@ -14,7 +14,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from rest_framework.views import APIView
 
 class HealthRecommendationView(APIView):
     """
